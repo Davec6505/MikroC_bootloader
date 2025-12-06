@@ -1,4 +1,14 @@
 
+# Auto-detect OS and export for sub-makefiles
+ifeq ($(OS),Windows_NT)
+    export OS_TYPE := WINDOWS
+else
+    UNAME_S := $(shell uname -s)
+    ifeq ($(UNAME_S),Linux)
+        export OS_TYPE := LINUX
+    endif
+endif
+
 BUILD=make
 CLEAN=make clean
 BUILD_DIR=make build_dir

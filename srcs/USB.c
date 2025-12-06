@@ -1,13 +1,27 @@
+// OS Detection
+#if defined(_WIN32) || defined(_WIN64) || defined(__CYGWIN__)
+    #ifndef _WIN32
+        #define _WIN32
+    #endif
+#elif defined(__linux__)
+    #ifdef _WIN32
+        #undef _WIN32
+    #endif
+#endif
+
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <assert.h>
+#include <stdint.h>
 
+#ifndef _WIN32
 #include <linux/types.h>
 #include <linux/input.h>
 #include <linux/hidraw.h>
+#endif
 
 #include "USB.h"
 #include "Types.h"

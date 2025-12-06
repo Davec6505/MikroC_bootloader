@@ -21,15 +21,29 @@ Use the -I option if needed to specify the path to the libusb.h header file. For
 
  */
 
+// OS Detection
+#if defined(_WIN32) || defined(_WIN64) || defined(__CYGWIN__)
+    #ifndef _WIN32
+        #define _WIN32
+    #endif
+#elif defined(__linux__)
+    #ifdef _WIN32
+        #undef _WIN32
+    #endif
+#endif
+
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <assert.h>
+#include <stdint.h>
 
+#ifndef _WIN32
 #include <linux/types.h>
 #include <linux/input.h>
+#endif
 
 // Values for bmRequestType in the Setup transaction's Data packet.
 #include "Types.h"
@@ -90,8 +104,10 @@ int main(int argc, char **argv)
 		{
 			// The HID has been detected.
 			// Detach the hidusb driver from the HID to enable using libusb.
-
+			// Note: This is Linux-specific and not needed on Windows
+#ifndef _WIN32
 			libusb_detach_kernel_driver(devh, INTERFACE_NUMBER);
+#endif
 			{
 				result = libusb_claim_interface(devh, INTERFACE_NUMBER);
 				if (result >= 0)

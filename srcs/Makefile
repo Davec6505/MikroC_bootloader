@@ -10,7 +10,16 @@
 # BUILD_TYPE for various outcomes for DEBUG / RELEASE					          #
 #                                                                       #
 #=======================================================================#
-OS_TYPE	 	:= LINUX
+# Auto-detect OS
+ifeq ($(OS),Windows_NT)
+    OS_TYPE := WINDOWS
+else
+    UNAME_S := $(shell uname -s)
+    ifeq ($(UNAME_S),Linux)
+        OS_TYPE := LINUX
+    endif
+endif
+
 BUILD_TYPE  = $(RELEASE)
 #BUILD_TYPE  = $(DEBUG)
 MODULE_NAME = mikro_hb
@@ -70,7 +79,7 @@ endif
 
 #*****DONT MODIFY ABOVE ATTRIBUTES****#
 
-ifeq ($(CMP),gcc)
+ifeq ($(COMPILER),c)
  #SRCS := $(wildcard *.c)
  SRCS := USB.c Utils.c HexFile.c MikroHB.c
  OBJS := $(SRCS:%.c=$(OBJ_DIR)/%.o)
@@ -81,7 +90,17 @@ else
  STDFLAG := -std=c++17 
 endif
 
-INC =  -I/usr/include/libusb-1.0 -lusb-1.0
+ifeq ($(OS_TYPE),LINUX)
+INC := -I/usr/include/libusb-1.0
+LDFLAGS := -lusb-1.0
+else ifeq ($(OS_TYPE),WINDOWS)
+    # On Windows, user should have MinGW64 bin and include in PATH
+    # Or set LIBUSB_INCLUDE and LIBUSB_LIB environment variables
+    LIBUSB_INCLUDE ?= /mingw64/include/libusb-1.0
+    LIBUSB_LIB ?= /mingw64/lib
+    INC = -I$(LIBUSB_INCLUDE)
+    LDFLAGS := -L$(LIBUSB_LIB) -lusb-1.0 -lws2_32
+endif
 INC_LOCAL = -I$(ROOT_DIR)/incs
 
 #choose release/debug
@@ -106,8 +125,7 @@ all: $(TARGET)
 	@echo $(SRCS) '=' $(OBJS)
 
 $(TARGET): $(OBJS)
-	$(LDXX) $(INC) -o $@  $^
-#$(SYNC)
+	$(LDXX) -o $@  $^ $(LDFLAGS)
 
 $(OBJ_DIR)/%.o: %.c
 	$(CMP) $(CCFLAGS) -c $< -o $@  
