@@ -1,8 +1,25 @@
+// OS Detection
+#if defined(_WIN32) || defined(_WIN64) || defined(__CYGWIN__)
+    #ifndef _WIN32
+        #define _WIN32
+    #endif
+#elif defined(__linux__)
+    #ifdef _WIN32
+        #undef _WIN32
+    #endif
+#endif
 
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#ifndef _WIN32
+#include <linux/types.h>
+#include <linux/input.h>
+#endif
 
 #include "HexFile.h"
 #include "Types.h"
@@ -36,11 +53,284 @@ uint32_t bootaddress_space = 0;
 uint32_t prg_mem_count = 0;
 uint32_t conf_mem_count = 0;
 
+// Progress tracking for legacy bootloader
+static uint32_t total_bytes_to_write = 0;
+static uint32_t bytes_written = 0;
+
 // iterate the vector array in state machine
 int vector_index = 0;
 
 void overwrite_bootflash_program(void);
 uint32_t page_iteration_calc(uint16_t row_page_size, uint32_t mem_quantity);
+
+/*
+ * Determine which type of memory region an address belongs to
+ * Returns: 0=program flash, 1=boot flash, 2=config flash
+ */
+uint8_t determine_region_type(uint32_t address)
+{
+    if (address >= _PIC32Mn_STARTCONF)
+    {
+        return 2; // Config flash
+    }
+    else if (address >= _PIC32Mn_STARTFLASH)
+    {
+        return 0; // Program flash (will distinguish boot flash later based on bootinfo)
+    }
+    return 0xFF; // Unknown/invalid
+}
+
+/*
+ * First pass: Analyze hex file to find all memory regions and calculate sizes
+ * This allows us to allocate the exact amount of memory needed
+ */
+int analyze_hex_file(const char *path, HexFileInfo *hex_info)
+{
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL)
+    {
+        fprintf(stderr, "Could not open hex file: %s\n", path);
+        return -1;
+    }
+
+    uint8_t line[64] = {0};
+    _HEX_ hex = {0};
+    int c_ = 0;
+    uint32_t root_address = 0;
+    uint32_t address = 0;
+
+    // Initialize hex_info
+    memset(hex_info, 0, sizeof(HexFileInfo));
+    hex_info->min_address = 0xFFFFFFFF;
+    hex_info->max_address = 0;
+    hex_info->region_count = 0;
+
+    // Temporary tracking for potential regions
+    typedef struct
+    {
+        uint32_t start;
+        uint32_t end;
+        uint8_t type;
+        int active;
+    } TempRegion;
+
+    TempRegion temp_regions[MAX_REGIONS] = {0};
+    int temp_region_count = 0;
+
+    // Parse hex file line by line
+    while (c_ != EOF)
+    {
+        file_extract_line(fp, line, c_);
+        memcpy((uint8_t *)&hex, &line, sizeof(_HEX_));
+        hex.report.add_lsw = swap_wordbytes(hex.report.add_lsw);
+
+        // Handle address record types (02, 04)
+        if (hex.report.report == 0x02 || hex.report.report == 0x04)
+        {
+            hex.add_msw = swap_wordbytes(hex.add_msw);
+            root_address = transform_2words_long(hex.add_msw, hex.report.add_lsw);
+        }
+        // Handle data records
+        else if (hex.report.report == 0x00)
+        {
+            address = root_address + hex.report.add_lsw;
+            uint8_t data_bytes = hex.report.data_quant;
+
+            if (data_bytes > 0)
+            {
+                uint32_t end_address = address + data_bytes - 1;
+                uint8_t region_type = determine_region_type(address);
+
+                // Update global min/max
+                if (address < hex_info->min_address)
+                    hex_info->min_address = address;
+                if (end_address > hex_info->max_address)
+                    hex_info->max_address = end_address;
+
+                // Find or create region for this address range
+                int found = 0;
+                for (int i = 0; i < temp_region_count; i++)
+                {
+                    if (temp_regions[i].type == region_type)
+                    {
+                        // Check if this data is contiguous or nearby
+                        // Allow up to 1KB gap to be considered same region
+                        if (address >= temp_regions[i].start && address <= temp_regions[i].end + 0x400)
+                        {
+                            // Extend existing region
+                            if (address < temp_regions[i].start)
+                                temp_regions[i].start = address;
+                            if (end_address > temp_regions[i].end)
+                                temp_regions[i].end = end_address;
+                            found = 1;
+                            break;
+                        }
+                    }
+                }
+
+                // Create new region if not found
+                if (!found && temp_region_count < MAX_REGIONS)
+                {
+                    temp_regions[temp_region_count].start = address;
+                    temp_regions[temp_region_count].end = end_address;
+                    temp_regions[temp_region_count].type = region_type;
+                    temp_regions[temp_region_count].active = 1;
+                    temp_region_count++;
+                }
+            }
+        }
+        // End of file record
+        else if (hex.report.report == 0x01)
+        {
+            break;
+        }
+    }
+
+    fclose(fp);
+
+    // Convert temp_regions to hex_info->regions
+    for (int i = 0; i < temp_region_count && i < MAX_REGIONS; i++)
+    {
+        if (temp_regions[i].active)
+        {
+            hex_info->regions[hex_info->region_count].phys_start = temp_regions[i].start;
+            hex_info->regions[hex_info->region_count].phys_end = temp_regions[i].end;
+            hex_info->regions[hex_info->region_count].region_type = temp_regions[i].type;
+            hex_info->regions[hex_info->region_count].data_size =
+                temp_regions[i].end - temp_regions[i].start + 1;
+            hex_info->total_data_size += hex_info->regions[hex_info->region_count].data_size;
+            hex_info->region_count++;
+        }
+    }
+
+    printf("Hex file analysis:\n");
+    printf("  Total regions: %d\n", hex_info->region_count);
+    printf("  Total data size: %u bytes\n", hex_info->total_data_size);
+    printf("  Address range: 0x%08X - 0x%08X\n", hex_info->min_address, hex_info->max_address);
+
+    for (int i = 0; i < hex_info->region_count; i++)
+    {
+        const char *type_name[] = {"Program Flash", "Boot Flash", "Config Flash"};
+        printf("  Region %d: %s\n", i, type_name[hex_info->regions[i].region_type]);
+        printf("    Address: 0x%08X - 0x%08X\n",
+               hex_info->regions[i].phys_start,
+               hex_info->regions[i].phys_end);
+        printf("    Size: %u bytes\n", hex_info->regions[i].data_size);
+    }
+
+    return hex_info->region_count;
+}
+
+/*
+ * Second pass: Parse hex file and load data into allocated buffers
+ * Now we know exactly how much memory we need
+ */
+int parse_hex_file_regions(const char *path, HexFileInfo *hex_info, TBootInfo *bootinfo)
+{
+    // First, analyze the hex file to find all regions
+    if (analyze_hex_file(path, hex_info) < 0)
+    {
+        return -1;
+    }
+
+    // Allocate memory for all regions
+    // We'll allocate one contiguous buffer and partition it
+    uint8_t *data_buffer = (uint8_t *)malloc(hex_info->total_data_size);
+    if (data_buffer == NULL)
+    {
+        fprintf(stderr, "Failed to allocate %u bytes for hex data\n", hex_info->total_data_size);
+        return -1;
+    }
+
+    // Initialize buffer to 0xFF (erased flash state)
+    memset(data_buffer, 0xFF, hex_info->total_data_size);
+
+    // Assign buffer regions to each memory region
+    uint32_t buffer_offset = 0;
+    for (int i = 0; i < hex_info->region_count; i++)
+    {
+        hex_info->regions[i].data_ptr = data_buffer + buffer_offset;
+        hex_info->regions[i].data_offset = buffer_offset;
+        buffer_offset += hex_info->regions[i].data_size;
+    }
+
+    // Now parse the hex file again and load data into the correct regions
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL)
+    {
+        free(data_buffer);
+        fprintf(stderr, "Could not re-open hex file for data loading\n");
+        return -1;
+    }
+
+    uint8_t line[64] = {0};
+    _HEX_ hex = {0};
+    int c_ = 0;
+    uint32_t root_address = 0;
+    uint32_t address = 0;
+
+    while (c_ != EOF)
+    {
+        file_extract_line(fp, line, c_);
+        memcpy((uint8_t *)&hex, &line, sizeof(_HEX_));
+        hex.report.add_lsw = swap_wordbytes(hex.report.add_lsw);
+
+        if (hex.report.report == 0x02 || hex.report.report == 0x04)
+        {
+            hex.add_msw = swap_wordbytes(hex.add_msw);
+            root_address = transform_2words_long(hex.add_msw, hex.report.add_lsw);
+        }
+        else if (hex.report.report == 0x00)
+        {
+            address = root_address + hex.report.add_lsw;
+            uint8_t data_bytes = hex.report.data_quant;
+
+            if (data_bytes > 0)
+            {
+                // Find which region this address belongs to
+                for (int i = 0; i < hex_info->region_count; i++)
+                {
+                    if (address >= hex_info->regions[i].phys_start &&
+                        address <= hex_info->regions[i].phys_end)
+                    {
+                        // Calculate offset within this region
+                        uint32_t region_offset = address - hex_info->regions[i].phys_start;
+
+                        // Bounds check
+                        if (region_offset + data_bytes <= hex_info->regions[i].data_size)
+                        {
+                            // Copy data
+                            for (int k = 0; k < data_bytes; k++)
+                            {
+                                hex_info->regions[i].data_ptr[region_offset + k] =
+                                    line[k + sizeof(_HEX_REPORT_)];
+                            }
+                        }
+                        else
+                        {
+                            fprintf(stderr, "ERROR: Hex data exceeds region bounds at 0x%08X\n", address);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        else if (hex.report.report == 0x01)
+        {
+            break;
+        }
+    }
+
+    fclose(fp);
+
+    printf("Hex file data loaded successfully\n");
+    return hex_info->region_count;
+}
+
+/*
+ * TO BE DEPRECATED: Old function that assumes static memory layout
+ * Keeping for now for compatibility during transition
+ */
 
 /*
  * To get chip into bootloader mode to usb needs to interrupt transfer a sequence of packets
@@ -65,8 +355,6 @@ uint32_t page_iteration_calc(uint16_t row_page_size, uint32_t mem_quantity);
  ***************************************************/
 uint32_t condition_hexfile_data(char *path, TBootInfo *bootinfo)
 {
-    uint32_t prg_mem_last = 0;
-    uint32_t conf_mem_last = 0;
     uint32_t prg_byte_count = 0;
     uint32_t con_byte_count = 0;
     uint32_t count = 0;
@@ -146,15 +434,16 @@ uint32_t condition_hexfile_data(char *path, TBootInfo *bootinfo)
             if (address >= _PIC32Mn_STARTFLASH && address < _PIC32Mn_STARTCONF)
             {
                 uint32_t temp_prg_add = (address - _PIC32Mn_STARTFLASH);
-                prg_byte_count = temp_prg_add - prg_mem_last;
-                prg_mem_count += prg_byte_count;
-                prg_mem_last = temp_prg_add;
-                //  prg_byte_count = (prg_byte_count == 0) ? (uint32_t)hex.report.data_quant : prg_byte_count;
                 prg_byte_count = (uint32_t)hex.report.data_quant;
+                
+                // Track highest address written (includes gaps filled with 0xFF)
+                uint32_t end_address = temp_prg_add + prg_byte_count;
+                if (end_address > prg_mem_count)
+                    prg_mem_count = end_address;
+                
                 printf("prg [%08x] : [%u]\n", temp_prg_add, prg_mem_count);
 
                 for (uint32_t k = 0; k < prg_byte_count; k++)
-                //  for (int k = 0; k < hex.report.data_quant; k++)
                 {
                     *(prg_ptr + (temp_prg_add) + k) = line[k + sizeof(_HEX_REPORT_)];
                 }
@@ -196,6 +485,13 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
     static int8_t trigger = 0;
     int16_t result = 0;
     uint8_t _out_only = 0;
+    
+    // Reset progress counters
+    bytes_written = 0;
+    total_bytes_to_write = 0;
+    
+    // Pre-calculate total bytes across all regions
+    uint32_t total_program_bytes = 0;
 
     // flash size
     uint32_t size = 0;
@@ -278,6 +574,29 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
                 // handle address space from vector array, 1st 1d00 then 1fc0
                 if (vector_index == 1) // boot startup page
                 {
+                    // CRITICAL: Disable boot flash write to prevent bootloader corruption
+                    // The MikroElektronika bootloader protocol has a design flaw:
+                    // - BOOTLOADER_START points to the entry point, NOT the actual start of bootloader code
+                    // - The actual bootloader occupies space BEFORE BOOTLOADER_START
+                    // - Writing one erase block before BOOTLOADER_START overlaps the bootloader!
+                    //
+                    // Until the bootloader firmware is recompiled with correct BOOTLOADER_SIZE,
+                    // we must skip the boot flash write entirely.
+                    
+                    fprintf(stderr, "\nWARNING: Boot flash write (reset vector page) is DISABLED.\n");
+                    fprintf(stderr, "This prevents bootloader corruption, but the application may not boot correctly.\n");
+                    fprintf(stderr, "The bootloader firmware needs BOOTLOADER_SIZE reconfigured to reserve proper space.\n\n");
+                    
+                    // Skip to next vector_index (config flash)
+                    vector_index++;
+                    continue;
+                    
+                    // FIRST: Set up boot vector in conf_ptr (needed by overwrite_bootflash_program)
+                    // Select correct boot vector based on chip size
+                    if (bootinfo_t.ulMcuSize.fValue == MZ2048)
+                        memcpy(conf_ptr_start, boot_line[0], sizeof(boot_line[0]));
+                    else
+                        memcpy(conf_ptr_start, boot_line[1], sizeof(boot_line[1]));
 
                     prg_ptr = prg_ptr_start; // reset place holder
 
@@ -287,18 +606,16 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
                     prg_ptr = prg_ptr_start;                      // reset place holder
                     size = bootinfo_t.uiEraseBlock.fValue.intVal; // 0x4000
 
-                    //  Work out the boot start vector for a sanity check, MikroC bootloader uses program flash
-                    //  depending on the mcu ie. pic32mz1024efh 0x100000 in size
-                    _boot_flash_start = bootinfo_t.ulBootStart.fValue & V2P;
-                    _boot_flash_start -= bootinfo_t.uiEraseBlock.fValue.intVal;
+                    _boot_flash_start = reset_vector_page;
 
                     // erase a whole page 0x4000 for configuration vector
                     hex_load_limit = (bootinfo_t.uiEraseBlock.fValue.intVal / MAX_INTERRUPT_OUT_TRANSFER_SIZE) - 1;
 
-                    _temp_flash_erase_ = (_boot_flash_start); //+ (uint32_t)(1 * bootinfo_t.uiEraseBlock.fValue.intVal)) - 1;
+                    _temp_flash_erase_ = (_boot_flash_start);
 
 #if DEBUG == 2
-                    printf("%08x : %08x : %08x\n", vector[vector_index], _boot_flash_start, _temp_flash_erase_);
+                    printf("Reset vector: 0x%08X-0x%08X, Bootloader: 0x%08X+\n", 
+                           reset_vector_page, reset_vector_page_end, bootloader_start_phys);
 #endif
                     // pages to flash
                     _blocks_to_flash_ = 1;
@@ -311,12 +628,9 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
                     prg_ptr = prg_ptr_start;
                     conf_ptr = conf_ptr_start;
 
-                    // offset decided on memory size of chip
-                    if (bootinfo_t.ulMcuSize.fValue == MZ2048)
-                        memcpy(conf_ptr, boot_line[0], sizeof(boot_line[0]));
-                    else
-                        memcpy(conf_ptr, boot_line[1], sizeof(boot_line[1]));
-
+                    // NOTE: Boot vector is already placed in boot flash by overwrite_bootflash_program()
+                    // Config flash should only contain actual config bits from hex file, not boot vector
+                    
                     // transfer the config data over to program flash data pointer
                     memcpy(prg_ptr, conf_ptr, 0xffff); // bootinfo_t.uiWriteBlock.fValue.intVal);
 
@@ -379,7 +693,7 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
                     _page_tracking = 0;
                     bootaddress_space = vector[vector_index];
 
-                    _temp_flash_erase_ = (vector[vector_index]) + (uint32_t)(_blocks_to_flash_ * bootinfo_t.uiEraseBlock.fValue.intVal);
+                    _temp_flash_erase_ = (vector[vector_index]); // Start address for erase, not end
                 }
 
 #if DEBUG == 4
@@ -428,7 +742,7 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
                 _out_only = 1;
 
                 if (vector_index == 2)
-                    size = bootinfo_t.uiWriteBlock.fValue.intVal; // 2048;
+                    size = bootinfo_t.uiWriteBlock.fValue.intVal * 3; // 2048 * 3 = 6144 bytes for config
                 else if (vector_index == 1)
                     size = bootinfo_t.uiEraseBlock.fValue.intVal; // 0x4000;
                 else
@@ -442,6 +756,9 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
                             bootaddress_space += (bootinfo_t.uiEraseBlock.fValue.intVal);
                     }
                 }
+                
+                // Accumulate total for progress tracking
+                total_bytes_to_write += size;
 
                 hex_load_tracking = 0;
                 data_out[0] = 0x0f;
@@ -612,13 +929,14 @@ void load_hex_buffer(char *data, uint16_t iterable)
     for (i = 0; i < iterable; i++)
     {
         *(data + i) = *(prg_ptr++);
-#if DEBUG == 3
-        printf("%02x", *(data + i) & 0xff);
-#endif
     }
-#if DEBUG == 3
-    printf("\n");
-#endif
+    
+    // Update progress
+    bytes_written += iterable;
+    if (total_bytes_to_write > 0)
+    {
+        print_progress_bar("Programming", bytes_written, total_bytes_to_write);
+    }
 }
 
 /*

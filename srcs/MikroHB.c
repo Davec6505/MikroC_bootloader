@@ -53,6 +53,22 @@ Use the -I option if needed to specify the path to the libusb.h header file. For
 
 const int INTERFACE_NUMBER = 0;
 
+void print_usage(const char *prog_name)
+{
+	printf("Usage: %s [OPTIONS] <hexfile>\n", prog_name);
+	printf("\nOptions:\n");
+	printf("  --v2              Use new dynamic region-based bootloader (recommended)\n");
+	printf("  --verbose         Show detailed hex data transfer (for debugging)\n");
+	printf("  --serial <port>   Send serial trigger sequence before USB (e.g., COM5 or /dev/ttyUSB0)\n");
+	printf("  --baud <rate>     Serial baud rate (default: 115200)\n");
+	printf("  --help            Show this help message\n");
+	printf("\nExamples:\n");
+	printf("  %s firmware.hex\n", prog_name);
+	printf("  %s --v2 firmware.hex\n", prog_name);
+	printf("  %s --v2 --verbose firmware.hex\n", prog_name);
+	printf("  %s --serial COM5 --v2 firmware.hex\n", prog_name);
+}
+
 int main(int argc, char **argv)
 {
 	// Change these as needed to match idVendor and idProduct in your device's device descriptor.
@@ -64,33 +80,51 @@ int main(int argc, char **argv)
 	struct libusb_init_option *opts = {0};
 	int device_ready = 0;
 	int result = 0;
-	// path to file
 	char _path[250] = {0};
 
-	// condition file path
-	if (argc < 2)
+	// Parse command line arguments
+	int arg_idx = 1;
+	while (arg_idx < argc)
 	{
-		fprintf(stderr, "No path to hex!\n");
-		return 0;
-	}
-	else
-	{
-		size_t len_s = strlen(argv[1]);
-
-#if DEBUG == 5
-		printf("\nEnter the path of the hex file... ");
-		fgets(path, sizeof(path), stdin);
-#endif
-
-		// remove the carriage return and or newline feed from path if it exists
-		if (len_s > 0 && (argv[1][len_s - 1] == '\r' || argv[1][len_s - 1] == '\n'))
+		if (strcmp(argv[arg_idx], "--verbose") == 0 || strcmp(argv[arg_idx], "-v") == 0)
 		{
-			argv[1][len_s - 1] = '\0'; // remove \r | \n
+			g_verbose_mode = 1;
+			arg_idx++;
 		}
-		strcpy(_path, argv[1]);
-		// show the path? sanity check.
-		printf("\t*** %s ***\n", _path);
+		else if (strcmp(argv[arg_idx], "--help") == 0 || strcmp(argv[arg_idx], "-h") == 0)
+		{
+			print_usage(argv[0]);
+			return 0;
+		}
+		else if (argv[arg_idx][0] == '-')
+		{
+			// Unknown option, skip for now (might be serial options handled elsewhere)
+			arg_idx += 2;  // Assume option takes one argument
+		}
+		else
+		{
+			// This should be the hex file path
+			size_t len_s = strlen(argv[arg_idx]);
+			if (len_s > 0 && (argv[arg_idx][len_s - 1] == '\r' || argv[arg_idx][len_s - 1] == '\n'))
+			{
+				argv[arg_idx][len_s - 1] = '\0';
+			}
+			strcpy(_path, argv[arg_idx]);
+			break;
+		}
 	}
+
+	// Validate hex file path
+	if (strlen(_path) == 0)
+	{
+		fprintf(stderr, "Error: No hex file specified!\n\n");
+		print_usage(argv[0]);
+		return 1;
+	}
+
+	printf("\t*** %s ***\n", _path);
+	printf("\tVerbose: %s\n", g_verbose_mode ? "ON (hex debug)" : "OFF (progress bar)");
+	printf("\n");
 
 	result = libusb_init_context(NULL, NULL, 0);
 
@@ -132,11 +166,8 @@ int main(int argc, char **argv)
 
 	if (device_ready)
 	{
-		// Send and receive data.
-		// exchange_input_and_output_reports_via_interrupt_transfers(devh);
-		// exchange_input_and_output_reports_via_control_transfers(devh);
-		// exchange_feature_reports_via_control_transfers(devh);
 		setupChiptoBoot(devh, _path);
+		
 		// Finished using the device.
 		libusb_release_interface(devh, 0);
 	}
