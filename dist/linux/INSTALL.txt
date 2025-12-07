@@ -1,0 +1,75 @@
+================================================================================
+  MikroC USB HID Bootloader - Linux Installation
+================================================================================
+
+QUICK INSTALL
+-------------
+
+Open a terminal in this folder and run:
+
+    sudo ./install.sh
+
+Enter your password when prompted, and follow the on-screen instructions.
+
+
+WHAT IT DOES
+------------
+
+The installer will:
+- Install libusb-1.0 (if not already installed)
+- Copy mikro_hb to /usr/local/bin
+- Set up USB permissions (udev rules)
+- Make "mikro_hb" command available system-wide
+
+
+USAGE
+-----
+
+After installation, open any terminal and run:
+
+    mikro_hb firmware.hex
+
+Replace "firmware.hex" with the path to your hex file.
+
+
+SUPPORTED DISTRIBUTIONS
+-----------------------
+
+- Debian / Ubuntu / Mint (apt)
+- Fedora / RHEL / CentOS (dnf/yum)
+- Arch Linux / Manjaro (pacman)
+- openSUSE (zypper)
+
+
+UNINSTALL
+---------
+
+    sudo rm /usr/local/bin/mikro_hb
+    sudo rm /etc/udev/rules.d/99-mikrohb.rules
+    sudo udevadm control --reload-rules
+
+
+TROUBLESHOOTING
+---------------
+
+If "mikro_hb" command not found:
+- Make sure /usr/local/bin is in your PATH
+- Try logging out and back in
+
+If USB device not detected:
+- Run: sudo udevadm control --reload-rules
+- Unplug and replug the device
+- Add yourself to plugdev group: sudo usermod -a -G plugdev $USER
+- Log out and back in for group changes to take effect
+
+
+PERMISSIONS
+-----------
+
+After installation, you should NOT need sudo to run mikro_hb.
+The udev rules grant access to all users in the "plugdev" group.
+
+
+================================================================================
+For more information, visit: https://github.com/Davec6505/MikroC_bootloader_lnx
+================================================================================

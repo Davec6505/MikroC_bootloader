@@ -30,6 +30,13 @@
 // 1 = print out info relating to usb transfers
 #define DEBUG 1
 
+// Set to 1 to enable debug printf statements
+// Set to 0 to hide USB packet dumps (file logging still works if DEBUG == 1)
+#define DEBUG_PRINT 0
+
+static FILE *packet_log = NULL;
+static int packet_counter = 0;
+
 static const int CONTROL_REQUEST_TYPE_IN = LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_INTERFACE;
 static const int CONTROL_REQUEST_TYPE_OUT = LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_INTERFACE;
 
@@ -71,6 +78,27 @@ int boot_interrupt_transfers(libusb_device_handle *devh, char *data_in, char *da
     if (result >= 0 | out_only == 1)
     {
 #if DEBUG == 1
+        // Open log file on first packet
+        if (packet_log == NULL)
+        {
+            packet_log = fopen("our_packets.txt", "w");
+        }
+        
+        // Log packet to file (same format as dissect file - 128 hex chars per line)
+        if (packet_log != NULL)
+        {
+            // Only log 64 bytes (128 hex chars) to match PCAP format
+            int bytes_to_log = (bytes_transferred > 64) ? 64 : bytes_transferred;
+            for (i = 0; i < bytes_to_log; i++)
+            {
+                fprintf(packet_log, "%02x", data_out[i] & 0xff);
+            }
+            fprintf(packet_log, "\n");
+            fflush(packet_log);
+        }
+#endif
+        
+#if DEBUG == 2
         //  printf("Data sent via interrupt transfer:\n");
         for (i = 0; i < bytes_transferred; i++)
         {
@@ -96,7 +124,7 @@ int boot_interrupt_transfers(libusb_device_handle *devh, char *data_in, char *da
         {
             if (bytes_transferred > 0)
             {
-#if DEBUG == 1
+#if DEBUG == 1 && DEBUG_PRINT == 1
                 // printf("Data received via interrupt transfer:\n");
                 for (i = 0; i < bytes_transferred; i++)
                 {

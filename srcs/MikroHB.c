@@ -88,7 +88,7 @@ int main(int argc, char **argv)
 	{
 		if (strcmp(argv[arg_idx], "--verbose") == 0 || strcmp(argv[arg_idx], "-v") == 0)
 		{
-			g_verbose_mode = 1;
+			// g_verbose_mode = 1;
 			arg_idx++;
 		}
 		else if (strcmp(argv[arg_idx], "--help") == 0 || strcmp(argv[arg_idx], "-h") == 0)
@@ -123,7 +123,7 @@ int main(int argc, char **argv)
 	}
 
 	printf("\t*** %s ***\n", _path);
-	printf("\tVerbose: %s\n", g_verbose_mode ? "ON (hex debug)" : "OFF (progress bar)");
+	// printf("\tVerbose: %s\n", g_verbose_mode ? "ON (hex debug)" : "OFF (progress bar)");
 	printf("\n");
 
 	result = libusb_init_context(NULL, NULL, 0);

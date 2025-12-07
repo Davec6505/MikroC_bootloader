@@ -1,0 +1,3 @@
+dist/windows/*.exe
+dist/windows/*.dll
+dist/linux/mikro_hb

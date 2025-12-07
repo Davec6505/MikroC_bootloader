@@ -1,0 +1,62 @@
+================================================================================
+  MikroC USB HID Bootloader - Windows Installation
+================================================================================
+
+QUICK INSTALL
+-------------
+
+1. Right-click "install.ps1"
+2. Select "Run with PowerShell"
+3. Click "Yes" when prompted for Administrator privileges
+4. Done! The program is now in your PATH
+
+
+WHAT IT DOES
+------------
+
+The installer will:
+- Copy files to: C:\Program Files\MikroHB\
+- Add MikroHB to your system PATH
+- Make "mikro_hb" command available from any terminal
+
+
+USAGE
+-----
+
+After installation, open any PowerShell or Command Prompt and run:
+
+    mikro_hb firmware.hex
+
+Replace "firmware.hex" with the path to your hex file.
+
+
+UNINSTALL
+---------
+
+1. Right-click "uninstall.ps1"
+2. Select "Run with PowerShell"
+3. Click "Yes" when prompted for Administrator privileges
+
+
+REQUIREMENTS
+------------
+
+- Windows 7 or later
+- No additional software needed (libusb included)
+
+
+TROUBLESHOOTING
+---------------
+
+If "mikro_hb" command not found after install:
+1. Close and reopen your terminal
+2. Or restart your computer
+
+If installation fails:
+- Make sure you run as Administrator
+- Check antivirus isn't blocking the installer
+
+
+================================================================================
+For more information, visit: https://github.com/Davec6505/MikroC_bootloader_lnx
+================================================================================
