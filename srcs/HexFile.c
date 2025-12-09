@@ -622,6 +622,8 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
                         // prg_ptr = prg_ptr_start;
                         data_out[i] = 0x0;
                     }
+                    // After sending final reboot command, we'll exit the loop
+                    // This will be set to cmdDONE after the USB transfer completes
                 }
                 else
                 {
@@ -689,8 +691,12 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
 
                 break;
             case cmdREBOOT:
-                // Exit the main loop after reboot command is sent
-                tcmd_t = cmdDONE;
+                // Only exit loop when vector_index > 2 (final reboot sent)
+                // If vector_index <= 2, cmdREBOOT sets tcmd_t = cmdNON to continue
+                if (vector_index > 2)
+                {
+                    tcmd_t = cmdDONE;
+                }
                 break;
             default:
                 break;
