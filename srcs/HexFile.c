@@ -689,6 +689,8 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
 
                 break;
             case cmdREBOOT:
+                // Exit the main loop after reboot command is sent
+                tcmd_t = cmdDONE;
                 break;
             default:
                 break;
