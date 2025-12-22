@@ -69,6 +69,7 @@ int vector_index = 0;
 
 void overwrite_bootflash_program(void);
 uint32_t page_iteration_calc(uint16_t row_page_size, uint32_t mem_quantity);
+void rewrite_reset_vector(uint8_t *reset_vector, uint32_t app_start_offset);
 
 // Progress bar function
 void print_progress_bar(const char *label, uint32_t current, uint32_t total)
@@ -363,6 +364,20 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
                 _out_only = 0;
 
                 // handle address space from vector array, 1st 1d00 then 1fc0
+                
+                // Load hex file once at the beginning (before processing any vectors)
+                static int hex_file_loaded = 0;
+                if (!hex_file_loaded && (prg_ptr == NULL || conf_ptr == NULL))
+                {
+                    size = condition_hexfile_data(path, &bootinfo_t);
+                    hex_file_loaded = 1;
+#if DEBUG_PRINT == 1
+                    printf("Hex file loaded: %u bytes\n", size);
+                    printf("Config flash data at offset 0xFFC0: %02x %02x %02x %02x\n",
+                           conf_ptr[0xFFC0], conf_ptr[0xFFC0+1], conf_ptr[0xFFC0+2], conf_ptr[0xFFC0+3]);
+#endif
+                }
+                
                 if (vector_index == 1) // boot startup page
                 {
                     prg_ptr = prg_ptr_start; // reset place holder
@@ -397,36 +412,17 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
                     prg_ptr = prg_ptr_start;
                     conf_ptr = conf_ptr_start;
 
-                    // Copy ONLY the first instruction (4 bytes) from saved copy (not corrupted buffer)
-                    // The PIC32MZ boots from config flash at reset
-#if DEBUG_PRINT == 1
-                    printf("Using first_instruction: %02x %02x %02x %02x\n", 
-                           first_instruction[0], first_instruction[1], first_instruction[2], first_instruction[3]);
-#endif
-                    memcpy(conf_ptr, first_instruction, 4);
+                    // Config flash just contains bootloader jump vector at reset
+                    // Use boot_line[1] for 1MB devices (0xBD0F4000), boot_line[0] for 2MB (0xBD1F4000)
+                    if (bootinfo_t.ulMcuSize.fValue == 0x200000) // 2MB
+                        memcpy(conf_ptr, boot_line[0], sizeof(boot_line[0]));
+                    else // 1MB
+                        memcpy(conf_ptr, boot_line[1], sizeof(boot_line[1]));
                     
-                    // Fill the rest of the first 64 bytes with nop instructions
-                    uint32_t nop = 0x70000000;  // nop instruction (little-endian: 0x00 0x00 0x00 0x70)
-                    for (int i = 1; i < 16; i++)
-                    {
-                        memcpy(conf_ptr + (i * 4), &nop, 4);
-                    }
-                    
-                    // After first 64 bytes, add the boot vector (jumps to bootloader at BD0F4000)
-                    uint8_t boot_vector[16] = {
-                        0x0F, 0xBD, 0x1E, 0x3C,  // lui $30, 0xBD0F
-                        0x00, 0x40, 0xDE, 0x37,  // ori $30, $30, 0x4000
-                        0x08, 0x00, 0xC0, 0x03,  // jr $30
-                        0x00, 0x00, 0x00, 0x70   // nop (delay slot)
-                    };
-                    memcpy(conf_ptr + 64, boot_vector, 16);
-                    
-                    // For config flash, we'll use conf_ptr directly in load_hex_buffer
-                    // Don't copy to prg_ptr - that would overwrite program flash data!
+                    // Rest of buffer stays 0xFF (already initialized in condition_hexfile_data)
 
-                    // Config flash write is 0x1800 (6144 bytes) = 3 write blocks = 96 packets
-                    // hex_load_limit = (0xffff + 1) / MAX_INTERRUPT_OUT_TRANSFER_SIZE;
-                    hex_load_limit = ((bootinfo_t.uiWriteBlock.fValue.intVal * 3) / MAX_INTERRUPT_OUT_TRANSFER_SIZE) - 1;
+                    // Config flash write is only 2048 bytes (original working size)
+                    hex_load_limit = 2048 / MAX_INTERRUPT_OUT_TRANSFER_SIZE;
 
                     // set the start address to flash erase
                     _temp_flash_erase_ = (vector[vector_index]);
@@ -541,7 +537,7 @@ void setupChiptoBoot(struct libusb_device_handle *devh, char *path)
 
                 if (vector_index == 2)
                 {
-                    size = bootinfo_t.uiWriteBlock.fValue.intVal * 3; // 0x1800 (6144 bytes) - three write blocks for config
+                    size = 2048; // Original working size - just bootloader vector + 0xFF padding
                 }
                 else if (vector_index == 1)
                 {
@@ -818,13 +814,19 @@ void file_extract_line(FILE *fp, char *buf, int fp_result)
 void overwrite_bootflash_program(void)
 {
     int i = 0;
-    // Default PIC32 boot vector - jumps to 0xBFC00050 (default boot flash)
-    uint8_t default_boot_vector[16] = {
-        0xC0, 0xBF, 0x1E, 0x3C,  // lui $30, 0xBFC0
-        0x50, 0x00, 0xDE, 0x37,  // ori $30, $30, 0x0050
-        0x08, 0x00, 0xC0, 0x03,  // jr $30
-        0x00, 0x00, 0x00, 0x70   // nop (delay slot)
-    };
+    
+    // Boot flash should contain the reset vector from config flash region of hex file
+    // The hex file has a reset vector at 0x1FC00000 that typically jumps to 0xBFC00010
+    // This is stored in conf_ptr buffer (config flash data)
+    
+#if DEBUG_PRINT == 1
+    printf("overwrite_bootflash_program() - placing config flash reset vector\n");
+    printf("Reset vector from conf_ptr: ");
+    for(int j=0; j<16; j++) {
+        printf("%02x", conf_ptr_start[j]);
+    }
+    printf("\n");
+#endif
     
     // Fill entire boot vector page with 0xFF
     for (i = 0; i < (0x4000 - 16); i++)
@@ -832,8 +834,13 @@ void overwrite_bootflash_program(void)
         *(prg_ptr++) = 0xff;
     }
     
-    // Place default boot vector at end (offset 0x3FF0)
-    memcpy(prg_ptr, default_boot_vector, 16);
+    // Place config flash reset vector at end of boot flash (offset 0x3FF0)
+    // This is the reset vector from address 0x1FC00000 in the hex file
+    memcpy(prg_ptr, conf_ptr_start, 16);
+    
+#if DEBUG_PRINT == 1
+    printf("Reset vector written at offset 0x3FF0\n");
+#endif
 }
 
 uint32_t page_iteration_calc(uint16_t row_page_size, uint32_t mem_quantity)
@@ -846,4 +853,70 @@ uint32_t page_iteration_calc(uint16_t row_page_size, uint32_t mem_quantity)
     result += (uint32_t)integer;
 
     return result;
+}
+
+/*
+ * Rewrite MIPS reset vector to redirect to application in KSEG0 program flash
+ * 
+ * The hex file contains a reset vector that jumps to boot flash (0xBFC0xxxx).
+ * We need to rewrite it to jump to the application code in KSEG0 (0x9D00xxxx).
+ * 
+ * MIPS jump sequence format:
+ *   lui k0, 0xXXXX      (load upper immediate)
+ *   addiu k0, k0, 0xYYYY (add immediate unsigned)
+ *   jr k0               (jump register)
+ *   nop                 (delay slot)
+ */
+void rewrite_reset_vector(uint8_t *reset_vector, uint32_t app_start_offset)
+{
+    // Decode the original reset vector to find where it's trying to jump
+    uint32_t lui_opcode = reset_vector[0] | (reset_vector[1] << 8) | (reset_vector[2] << 16) | (reset_vector[3] << 24);
+    uint32_t addiu_opcode = reset_vector[4] | (reset_vector[5] << 8) | (reset_vector[6] << 16) | (reset_vector[7] << 24);
+    
+    // Extract the immediate values
+    uint16_t lui_imm = (lui_opcode >> 16) & 0xFFFF;
+    int16_t addiu_imm = (addiu_opcode >> 16) & 0xFFFF;  // Signed
+    
+    // Calculate original target address
+    uint32_t original_target = (lui_imm << 16) + (uint32_t)addiu_imm;
+    
+#if DEBUG_PRINT == 1
+    printf("Original reset vector jump target: 0x%08x\n", original_target);
+#endif
+    
+    // Calculate the offset from boot flash base
+    // If it's a BFC0xxxx address, extract the offset
+    uint32_t boot_offset = 0;
+    if ((original_target & 0xFFF00000) == 0xBFC00000) {
+        boot_offset = original_target & 0xFFFF;
+    }
+    
+    // Calculate the new target address in KSEG0 program flash
+    // The application code starts at app_start_offset in program flash
+    uint32_t new_target = 0x9D000000 + app_start_offset + boot_offset;
+    
+#if DEBUG_PRINT == 1
+    printf("Rewritten reset vector jump target: 0x%08x\n", new_target);
+#endif
+    
+    // Build new MIPS instructions
+    uint16_t new_lui_imm = (new_target >> 16) & 0xFFFF;
+    int16_t new_addiu_imm = new_target & 0xFFFF;
+    
+    // Reconstruct the instructions (little-endian)
+    // lui k0, new_upper    (opcode: 0x3C1A = lui $k0)
+    uint32_t new_lui = 0x3C1A0000 | new_lui_imm;
+    reset_vector[0] = new_lui & 0xFF;
+    reset_vector[1] = (new_lui >> 8) & 0xFF;
+    reset_vector[2] = (new_lui >> 16) & 0xFF;
+    reset_vector[3] = (new_lui >> 24) & 0xFF;
+    
+    // addiu k0, k0, new_lower    (opcode: 0x275A = addiu $k0, $k0)
+    uint32_t new_addiu = 0x275A0000 | (new_addiu_imm & 0xFFFF);
+    reset_vector[4] = new_addiu & 0xFF;
+    reset_vector[5] = (new_addiu >> 8) & 0xFF;
+    reset_vector[6] = (new_addiu >> 16) & 0xFF;
+    reset_vector[7] = (new_addiu >> 24) & 0xFF;
+    
+    // Keep jr k0 and nop unchanged (bytes 8-15)
 }
